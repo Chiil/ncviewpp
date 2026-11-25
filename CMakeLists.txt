@@ -24,6 +24,30 @@ elseif(NCVPP_FETCH_SDL3)
   set(SDL_STATIC ON CACHE BOOL "" FORCE)
   set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
   set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+  # SDL3 hard-errors when an optional X11 extension is enabled but its headers
+  # are missing (common on HPC login nodes). Probe each and disable if absent.
+  if(UNIX AND NOT APPLE)
+    include(CheckIncludeFiles)
+    foreach(ext_hdr
+        "XCURSOR:X11/Xcursor/Xcursor.h"
+        "XDBE:X11/extensions/Xdbe.h"
+        "XINPUT:X11/extensions/XInput2.h"
+        "XFIXES:X11/extensions/Xfixes.h"
+        "XRANDR:X11/extensions/Xrandr.h"
+        "XSCRNSAVER:X11/extensions/scrnsaver.h"
+        "XSHAPE:X11/extensions/shape.h"
+        "XSYNC:X11/extensions/sync.h"
+        "XTEST:X11/extensions/XTest.h")
+      string(REPLACE ":" ";" ext_hdr "${ext_hdr}")
+      list(GET ext_hdr 0 ext)
+      list(GET ext_hdr 1 hdr)
+      check_include_files("X11/Xlib.h;${hdr}" NCVPP_HAVE_X11_${ext})
+      if(NOT NCVPP_HAVE_X11_${ext})
+        message(STATUS "ncview++: ${hdr} not found, building SDL3 with SDL_X11_${ext}=OFF")
+        set(SDL_X11_${ext} OFF CACHE BOOL "" FORCE)
+      endif()
+    endforeach()
+  endif()
   # Offline machines: pass -DFETCHCONTENT_SOURCE_DIR_SDL3=/path/to/SDL3-src
   FetchContent_Declare(SDL3
     URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.20.tar.gz)
