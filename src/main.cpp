@@ -162,8 +162,18 @@ int main(int argc, char** argv) {
     if (!opt.dump.empty()) return dumpPPM(ds, opt);
 
     // Over ssh (X11 forwarding) GPU rendering is usually unavailable or slow: use software.
-    bool remote = std::getenv("SSH_CONNECTION") || std::getenv("SSH_CLIENT");
+    // A DISPLAY with a host part (e.g. "localhost:10.0") is a remote/forwarded X server, even when
+    // the ssh variables are not visible (sudo, screen/tmux started elsewhere, job launchers).
+    const char* display = std::getenv("DISPLAY");
+    bool remoteX = display && display[0] != ':' && display[0] != '/' && std::strchr(display, ':');
+    bool remote = remoteX || std::getenv("SSH_CONNECTION") || std::getenv("SSH_CLIENT");
     if (opt.renderer.empty() && remote && !std::getenv("WAYLAND_DISPLAY")) opt.renderer = "software";
+    if (opt.renderer == "software") {
+        // Keep SDL away from GLX entirely: a failing GLX call over forwarded X aborts the process
+        // with an X error, so it cannot be caught and fallen back from.
+        SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+        SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
+    }
     SDL_SetHint(SDL_HINT_APP_NAME, "ncview++");
     SDL_SetHint(SDL_HINT_VIDEO_ALLOW_SCREENSAVER, "1");
     installSignalThread();
