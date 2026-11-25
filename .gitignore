@@ -1,0 +1,8 @@
+build/
+*.nc
+*.ppm
+*.bmp
+.cache/
+compile_commands.json
+*.h5
+ncview-*.tar.gz
