@@ -911,7 +911,18 @@ void App::drawCanvas(ImVec2 size) {
     const ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
     if (u1 > u0 && v1 > v0) {
         if (!smooth_ && pio.DrawCallback_SetSamplerNearest) dl->AddCallback(pio.DrawCallback_SetSamplerNearest, nullptr);
-        dl->AddImage((ImTextureID)(intptr_t)tex_, toScreen(u0, v0), toScreen(u1, v1), ImVec2(u0 / iw, v0 / ih), ImVec2(u1 / iw, v1 / ih));
+        // Split into tiles: SDL's software renderer drops one triangle of large textured quads
+        // (seen with SDL 3.4 for quads ~1500 px wide); tiles of <= 256 px render correctly.
+        const ImVec2 pa = toScreen(u0, v0), pb = toScreen(u1, v1);
+        const int ntx = std::max(1, (int)std::ceil((pb.x - pa.x) / 256.f));
+        const int nty = std::max(1, (int)std::ceil((pb.y - pa.y) / 256.f));
+        for (int j = 0; j < nty; ++j)
+            for (int i = 0; i < ntx; ++i) {
+                const float ua = u0 + (u1 - u0) * i / ntx, ub = u0 + (u1 - u0) * (i + 1) / ntx;
+                const float va = v0 + (v1 - v0) * j / nty, vb = v0 + (v1 - v0) * (j + 1) / nty;
+                dl->AddImage((ImTextureID)(intptr_t)tex_, toScreen(ua, va), toScreen(ub, vb),
+                             ImVec2(ua / iw, va / ih), ImVec2(ub / iw, vb / ih));
+            }
         if (!smooth_ && pio.DrawCallback_SetSamplerLinear) dl->AddCallback(pio.DrawCallback_SetSamplerLinear, nullptr);
     }
 
