@@ -532,11 +532,23 @@ void App::drawSidebar(float) {
         std::string f = p.empty() ? "" : p[0];
         size_t s = f.find_last_of('/');
         ImGui::TextUnformatted(s == std::string::npos ? f.c_str() : f.c_str() + s + 1);
-        if (p.size() > 1) { ImGui::SameLine(); ImGui::TextDisabled("+%zu files", p.size() - 1); }
+        if (p.size() > 1) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("+%zu files%s", p.size() - 1, ds_.merged() ? " (merged)" : "");
+        }
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             for (auto& x : p) ImGui::TextUnformatted(x.c_str());
             ImGui::EndTooltip();
+        }
+        if (!ds_.notes().empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%zu notes)", ds_.notes().size());
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                for (auto& n : ds_.notes()) ImGui::TextUnformatted(n.c_str());
+                ImGui::EndTooltip();
+            }
         }
     }
     ImGui::SetNextItemWidth(-fh * 4.5f);
@@ -669,7 +681,7 @@ void App::drawSidebar(float) {
             ImGui::TableNextColumn();
             ImGui::Text("%s", d.name.c_str());
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s\nlength %zu%s\n%s", d.longName.c_str(), d.len, d.isRecord ? " (record, multi-file)" : "", d.units.c_str());
+                ImGui::SetTooltip("%s\nlength %zu%s\n%s", d.longName.c_str(), d.len, d.isRecord ? (ds_.merged() ? " (common time steps of all files)" : " (record, multi-file)") : "", d.units.c_str());
             ImGui::TableNextColumn();
             if (isAxis) {
                 ImGui::TextDisabled("%s axis: %s .. %s", (int)i == xd_ ? "X" : "Y", d.format(0).c_str(), d.format(d.len ? d.len - 1 : 0).c_str());

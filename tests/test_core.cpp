@@ -203,6 +203,44 @@ static void testGroups(const std::string& dir) {
     EXPECT(c.vars()[c.findVar("tas")].fullName == "tas");
 }
 
+static void testMerge(const std::string& dir) {
+    std::string err;
+    Dataset m;
+    EXPECT(m.open({dir + "/merge_a.nc", dir + "/merge_b.nc", dir + "/merge_c.nc"}, err));
+    EXPECT(m.merged());
+    int a = m.findVar("a"), b = m.findVar("b");
+    EXPECT(a >= 0 && b >= 0);
+    // Common times: 120, 180, 240 s (b is in minutes, every 30 s).
+    const DimInfo& t = m.dims()[m.vars()[a].dims[0]];
+    EXPECT(t.len == 3 && t.coord == (std::vector<double>{120, 180, 240}));
+    EXPECT(m.shape(a) == (std::vector<size_t>{3, 16}) && m.shape(b) == (std::vector<size_t>{3, 16}));
+    EXPECT(m.vars()[a].dims == m.vars()[b].dims);
+    std::vector<float> out;
+    EXPECT(m.read(a, {0, 0}, {3, 1}, out) && out == (std::vector<float>{200, 300, 400}));
+    EXPECT(m.read(b, {0, 3}, {3, 1}, out) && out == (std::vector<float>{-3, -2003, -4003}));   // b steps 0, 2, 4
+    EXPECT(m.read(b, {1, 0}, {1, 16}, out) && out[5] == -2005.f);
+    EXPECT(m.findVar("s") >= 0);
+    // z of length 8 conflicts: c is hidden; d on its own grid is shown; the clashing a is renamed.
+    EXPECT(m.findVar("c") < 0);
+    int d = m.findVar("d");
+    EXPECT(d >= 0 && m.read(d, {0, 0}, {4, 6}, out) && out[23] == 7.f);
+    EXPECT(m.findVar("a (merge_c.nc)") >= 0);
+    EXPECT(!m.notes().empty());
+
+    // Order matters only for which file defines the reference time axis.
+    Dataset r;
+    EXPECT(r.open({dir + "/merge_b.nc", dir + "/merge_a.nc"}, err) && r.merged());
+    int ra = r.findVar("a");
+    EXPECT(r.shape(ra)[0] == 3 && r.read(ra, {2, 0}, {1, 1}, out) && out[0] == 400.f);
+
+    // Consecutive files still concatenate automatically; forcing merge keeps the first one's times.
+    Dataset c;
+    EXPECT(c.open({dir + "/tas_part1.nc", dir + "/tas_part2.nc"}, err) && !c.merged());
+    Dataset f;
+    EXPECT(f.open({dir + "/tas_part1.nc", dir + "/tas_part2.nc"}, err, MultiFile::Merge) && f.merged());
+    EXPECT(f.shape(f.findVar("tas"))[0] == 10);
+}
+
 static void bench(const std::string& path) {
     Dataset ds;
     std::string err;
@@ -233,6 +271,7 @@ int main(int argc, char** argv) {
     testTime();
     testDataset(dir);
     testGroups(dir);
+    testMerge(dir);
     bench(dir + "/big.nc");
     std::printf(fails ? "%d FAILURES\n" : "all tests passed\n", fails);
     return fails ? 1 : 0;

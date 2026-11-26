@@ -190,6 +190,74 @@ static void writeGroups(const std::string& path, int t0, int nt) {
     CHK(nc_close(nc));
 }
 
+// Files for merging: different variables per file, partly overlapping times, a conflicting grid.
+//   merge_a.nc: a(time, z), time = 0, 60, ..., 240 s
+//   merge_b.nc: b(time, z), time = 2, 2.5, ..., 5 min (120..300 s), static s(z)
+//   merge_c.nc: no time; c(z) with z of length 8 (conflict), d(y, x), a(y, x) (name clash)
+static void writeMerge(const std::string& dir) {
+    const int nz = 16;
+    std::vector<float> z(nz), a(nz);
+    for (int k = 0; k < nz; ++k) z[k] = 10.f * k;
+    auto common = [&](int nc, int& dt, int& dz, int& vt, const char* units) {
+        int vz;
+        CHK(nc_def_dim(nc, "time", NC_UNLIMITED, &dt));
+        CHK(nc_def_dim(nc, "z", nz, &dz));
+        CHK(nc_def_var(nc, "time", NC_DOUBLE, 1, &dt, &vt));
+        textAtt(nc, vt, "units", units);
+        CHK(nc_def_var(nc, "z", NC_FLOAT, 1, &dz, &vz));
+        CHK(nc_enddef(nc));
+        CHK(nc_put_var_float(nc, vz, z.data()));
+        CHK(nc_redef(nc));
+    };
+    int nc, dt, dz, vt, v, vs;
+    CHK(nc_create((dir + "/merge_a.nc").c_str(), NC_CLOBBER, &nc));
+    common(nc, dt, dz, vt, "seconds since 2020-01-01");
+    int d2[2];
+    d2[0] = dt; d2[1] = dz;
+    CHK(nc_def_var(nc, "a", NC_FLOAT, 2, d2, &v));
+    CHK(nc_enddef(nc));
+    for (int t = 0; t < 5; ++t) {
+        double tv = 60.0 * t;
+        size_t st1 = t, ct1 = 1, st[2] = {(size_t)t, 0}, ct[2] = {1, (size_t)nz};
+        CHK(nc_put_vara_double(nc, vt, &st1, &ct1, &tv));
+        for (int k = 0; k < nz; ++k) a[k] = 100.f * t + k;
+        CHK(nc_put_vara_float(nc, v, st, ct, a.data()));
+    }
+    CHK(nc_close(nc));
+
+    CHK(nc_create((dir + "/merge_b.nc").c_str(), NC_CLOBBER, &nc));
+    common(nc, dt, dz, vt, "minutes since 2020-01-01");
+    d2[0] = dt; d2[1] = dz;
+    CHK(nc_def_var(nc, "b", NC_FLOAT, 2, d2, &v));
+    CHK(nc_def_var(nc, "s", NC_FLOAT, 1, &dz, &vs));
+    CHK(nc_enddef(nc));
+    CHK(nc_put_var_float(nc, vs, z.data()));
+    for (int t = 0; t < 7; ++t) {
+        double tv = 2.0 + 0.5 * t;
+        size_t st1 = t, ct1 = 1, st[2] = {(size_t)t, 0}, ct[2] = {1, (size_t)nz};
+        CHK(nc_put_vara_double(nc, vt, &st1, &ct1, &tv));
+        for (int k = 0; k < nz; ++k) a[k] = -1000.f * t - k;
+        CHK(nc_put_vara_float(nc, v, st, ct, a.data()));
+    }
+    CHK(nc_close(nc));
+
+    int dz8, dy, dx, vc, vd, va;
+    CHK(nc_create((dir + "/merge_c.nc").c_str(), NC_CLOBBER, &nc));
+    CHK(nc_def_dim(nc, "z", 8, &dz8));
+    CHK(nc_def_dim(nc, "y", 4, &dy));
+    CHK(nc_def_dim(nc, "x", 6, &dx));
+    CHK(nc_def_var(nc, "c", NC_FLOAT, 1, &dz8, &vc));
+    int dyx[2] = {dy, dx};
+    CHK(nc_def_var(nc, "d", NC_FLOAT, 2, dyx, &vd));
+    CHK(nc_def_var(nc, "a", NC_FLOAT, 2, dyx, &va));
+    CHK(nc_enddef(nc));
+    std::vector<float> c(8, 1.f), d(24, 7.f);
+    CHK(nc_put_var_float(nc, vc, c.data()));
+    CHK(nc_put_var_float(nc, vd, d.data()));
+    CHK(nc_put_var_float(nc, va, d.data()));
+    CHK(nc_close(nc));
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { std::fprintf(stderr, "usage: make_testdata OUTDIR [--big]\n"); return 2; }
     std::string d = argv[1];
@@ -200,6 +268,7 @@ int main(int argc, char** argv) {
     writeGroups(d + "/groups.nc", 0, 6);
     writeGroups(d + "/groups_part1.nc", 0, 2);
     writeGroups(d + "/groups_part2.nc", 2, 4);
+    writeMerge(d);
     if (argc > 2 && std::string(argv[2]) == "--big") {
         // ERA5-sized grid (0.25°): 721 x 1440, 48 times, compressed.
         writeNc4(d + "/big.nc", 48, 1, 721, 1440, true);

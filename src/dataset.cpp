@@ -86,26 +86,59 @@ std::vector<size_t> Dataset::shape(int v) const {
     return s;
 }
 
-void Dataset::scanGroup(int ncid, int parent, const std::string& name) {
-    GroupInfo g;
-    g.name = name;
-    g.parent = parent;
-    if (parent >= 0) g.path = groups_[parent].path.empty() ? name : groups_[parent].path + "/" + name;
-    g.ncid.push_back(ncid);
-    int idx = (int)groups_.size();
-    groups_.push_back(std::move(g));
-    if (parent >= 0) groups_[parent].children.push_back(idx);
+void Dataset::scanGroup(int ncid, int parent, const std::string& name, size_t fi) {
+    // Groups of all files form one tree, matched by path.
+    std::string path = parent < 0 ? "" : groups_[parent].path.empty() ? name : groups_[parent].path + "/" + name;
+    int idx = -1;
+    for (size_t i = 0; i < groups_.size(); ++i)
+        if (groups_[i].path == path && (parent < 0) == (groups_[i].parent < 0)) { idx = (int)i; break; }
+    if (idx < 0) {
+        GroupInfo g;
+        g.name = name;
+        g.parent = parent;
+        g.path = path;
+        g.ncid.assign(files_.size(), -1);
+        idx = (int)groups_.size();
+        groups_.push_back(std::move(g));
+        if (parent >= 0) groups_[parent].children.push_back(idx);
+    }
+    groups_[idx].ncid[fi] = ncid;
     int n = 0;
     if (nc_inq_grps(ncid, &n, nullptr) != NC_NOERR || n <= 0) return;   // classic files: no groups
     std::vector<int> ids(n);
     nc_inq_grps(ncid, &n, ids.data());
     for (int id : ids) {
         char nm[NC_MAX_NAME + 1];
-        if (nc_inq_grpname(id, nm) == NC_NOERR) scanGroup(id, idx, nm);
+        if (nc_inq_grpname(id, nm) == NC_NOERR) scanGroup(id, idx, nm, fi);
     }
 }
 
-bool Dataset::open(const std::vector<std::string>& paths, std::string& err) {
+static std::string baseName(const std::string& p) {
+    size_t s = p.find_last_of('/');
+    return s == std::string::npos ? p : p.substr(s + 1);
+}
+
+// Values of the coordinate variable `name` (1-D, length len) in group gid.
+static bool readCoordVar(int gid, const std::string& name, size_t len, std::vector<double>& out,
+                         std::string* units = nullptr, std::string* cal = nullptr) {
+    int vid, nd;
+    if (gid < 0 || nc_inq_varid(gid, name.c_str(), &vid) != NC_NOERR) return false;
+    if (nc_inq_varndims(gid, vid, &nd) != NC_NOERR || nd != 1) return false;
+    out.assign(len, 0.0);
+    if (len > 0 && nc_get_var_double(gid, vid, out.data()) != NC_NOERR) return false;
+    if (units) *units = getTextAtt(gid, vid, "units");
+    if (cal) *cal = getTextAtt(gid, vid, "calendar");
+    return true;
+}
+
+static bool sameValues(const std::vector<double>& a, const std::vector<double>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!(std::fabs(a[i] - b[i]) <= 1e-5 * std::max(1.0, std::max(std::fabs(a[i]), std::fabs(b[i]))))) return false;
+    return true;
+}
+
+bool Dataset::open(const std::vector<std::string>& paths, std::string& err, MultiFile mode) {
     std::lock_guard<std::mutex> lk(g_ncMutex);
     // A larger chunk cache makes stepping through compressed netCDF-4 data much faster.
     nc_set_chunk_cache(256u << 20, 4133, 0.75f);
@@ -116,81 +149,242 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err) {
         if (st != NC_NOERR) { err = p + ": " + nc_strerror(st); return false; }
         files_.push_back(f);
     }
-    int ncid = files_[0].ncid;
+    const size_t nf = files_.size();
+    if (nf == 0) { err = "no files"; return false; }
+    for (size_t fi = 0; fi < nf; ++fi) scanGroup(files_[fi].ncid, -1, "", fi);
 
-    // Group tree of the first file; matching groups in the other files are looked up by path.
-    scanGroup(ncid, -1, "");
-    for (size_t fi = 1; fi < files_.size(); ++fi)
-        for (auto& g : groups_) {
-            int id = -1;
-            if (g.path.empty()) id = files_[fi].ncid;
-            else if (nc_inq_grp_full_ncid(files_[fi].ncid, ("/" + g.path).c_str(), &id) != NC_NOERR) id = -1;
-            g.ncid.push_back(id);
-        }
-
-    // Dimensions of all groups. Dim ids are unique within a file, so variables can refer to
-    // dimensions of ancestor groups through the same map.
-    int rootUnlim = -1;
-    nc_inq_unlimdim(ncid, &rootUnlim);
-    int firstUnlim = -1;
-    std::map<int, int> dimIndex;
-    for (size_t gi = 0; gi < groups_.size(); ++gi) {
-        int gid = groups_[gi].ncid[0];
-        int ndims = 0;
-        if (nc_inq_dimids(gid, &ndims, nullptr, 0) != NC_NOERR || ndims <= 0) continue;
-        std::vector<int> dimids(ndims);
-        nc_inq_dimids(gid, &ndims, dimids.data(), 0);
-        std::vector<int> unl;
-        if (gi > 0) {
-            int nu = 0;
-            if (nc_inq_unlimdims(gid, &nu, nullptr) == NC_NOERR && nu > 0) {
-                unl.resize(nu);
-                nc_inq_unlimdims(gid, &nu, unl.data());
+    // Dimensions of all groups of all files, matched by (group, name). Dim ids are unique within
+    // a file, so variables can refer to dimensions of ancestor groups through the per-file map.
+    std::vector<std::map<int, int>> dimMap(nf);       // file dimid -> index into dims_
+    std::vector<std::map<int, size_t>> dimLen(nf);    // index into dims_ -> length in that file
+    for (size_t fi = 0; fi < nf; ++fi) {
+        int rootUnlim = -1, firstUnlim = -1, fileRec = -1;
+        nc_inq_unlimdim(files_[fi].ncid, &rootUnlim);
+        for (size_t gi = 0; gi < groups_.size(); ++gi) {
+            int gid = groups_[gi].ncid[fi];
+            int ndims = 0;
+            if (gid < 0 || nc_inq_dimids(gid, &ndims, nullptr, 0) != NC_NOERR || ndims <= 0) continue;
+            std::vector<int> dimids(ndims);
+            nc_inq_dimids(gid, &ndims, dimids.data(), 0);
+            std::vector<int> unl;
+            if (gi > 0) {
+                int nu = 0;
+                if (nc_inq_unlimdims(gid, &nu, nullptr) == NC_NOERR && nu > 0) {
+                    unl.resize(nu);
+                    nc_inq_unlimdims(gid, &nu, unl.data());
+                }
+            }
+            for (int id : dimids) {
+                char name[NC_MAX_NAME + 1];
+                size_t len;
+                nc_inq_dim(gid, id, name, &len);
+                int idx = -1;
+                for (size_t k = 0; k < dims_.size(); ++k)
+                    if (dims_[k].group == (int)gi && dims_[k].name == name) { idx = (int)k; break; }
+                if (idx < 0) {
+                    DimInfo d; d.name = name; d.len = len; d.group = (int)gi;
+                    idx = (int)dims_.size();
+                    dims_.push_back(d);
+                }
+                dimMap[fi][id] = idx;
+                dimLen[fi][idx] = len;
+                if (id == rootUnlim) fileRec = idx;
+                if (firstUnlim < 0 && std::find(unl.begin(), unl.end(), id) != unl.end()) firstUnlim = idx;
             }
         }
-        for (int id : dimids) {
-            char name[NC_MAX_NAME + 1];
-            size_t len;
-            nc_inq_dim(gid, id, name, &len);
-            DimInfo d; d.name = name; d.len = len; d.group = (int)gi;
-            dimIndex[id] = (int)dims_.size();
-            if (id == rootUnlim) recDim_ = (int)dims_.size();
-            if (firstUnlim < 0 && std::find(unl.begin(), unl.end(), id) != unl.end()) firstUnlim = (int)dims_.size();
-            dims_.push_back(d);
+        // The record dim is the root's unlimited dim, else the first one in a group, of the
+        // first file that has one.
+        if (recDim_ < 0) recDim_ = fileRec >= 0 ? fileRec : firstUnlim;
+    }
+    auto hasRec = [&](size_t fi) { return recDim_ >= 0 && dimLen[fi].count(recDim_) > 0; };
+
+    // Record coordinate of every file, in the units of the first file that has it.
+    std::vector<std::vector<double>> ftime(nf);
+    std::vector<char> ftimeCoord(nf, 0);
+    if (nf > 1 && recDim_ >= 0) {
+        const DimInfo& rd = dims_[recDim_];
+        std::string refUnits;
+        CFTime refT;
+        bool haveRef = false;
+        for (size_t fi = 0; fi < nf; ++fi) {
+            if (!hasRec(fi)) continue;
+            size_t len = dimLen[fi][recDim_];
+            std::string units, cal;
+            if (readCoordVar(groups_[rd.group].ncid[fi], rd.name, len, ftime[fi], &units, &cal)) {
+                ftimeCoord[fi] = 1;
+                if (!haveRef) { haveRef = true; refUnits = units; refT.parse(units, cal); }
+                else if (units != refUnits) {
+                    CFTime t;
+                    if (t.parse(units, cal) && refT.valid() && t.calendar() == refT.calendar())
+                        for (double& x : ftime[fi]) x = t.convertTo(x, refT);
+                }
+            } else {
+                ftime[fi].resize(len);
+                for (size_t i = 0; i < len; ++i) ftime[fi][i] = (double)i;
+            }
         }
     }
-    if (recDim_ < 0) recDim_ = firstUnlim;   // no unlimited dim in the root: use the first one in a group
 
-    // Aggregate the record dimension across files.
-    if (files_.size() > 1) {
-        if (recDim_ < 0) {
-            err = "multiple files given but the first file has no unlimited (record) dimension";
-            return false;
+    // Full names of the displayable variables of a file.
+    auto varNames = [&](size_t fi) {
+        std::vector<std::string> names;
+        for (const auto& g : groups_) {
+            int gid = g.ncid[fi], nvars = 0;
+            if (gid < 0 || nc_inq_varids(gid, &nvars, nullptr) != NC_NOERR || nvars <= 0) continue;
+            std::vector<int> ids(nvars);
+            nc_inq_varids(gid, &nvars, ids.data());
+            for (int vid : ids) {
+                char name[NC_MAX_NAME + 1];
+                nc_inq_varname(gid, vid, name);
+                names.push_back(g.path.empty() ? name : g.path + "/" + name);
+            }
         }
-        const GroupInfo& rg = groups_[dims_[recDim_].group];
-        size_t total = 0;
-        for (size_t fi = 0; fi < files_.size(); ++fi) {
-            File& f = files_[fi];
-            int did;
-            if (rg.ncid[fi] < 0 || nc_inq_dimid(rg.ncid[fi], dims_[recDim_].name.c_str(), &did) != NC_NOERR) {
-                err = f.path + ": has no dimension '" + (rg.path.empty() ? "" : rg.path + "/") + dims_[recDim_].name + "'";
+        std::sort(names.begin(), names.end());
+        return names;
+    };
+
+    // Concatenate or merge?
+    if (nf > 1) {
+        if (mode == MultiFile::Merge) merged_ = true;
+        else if (mode == MultiFile::Concat) merged_ = false;
+        else {
+            bool allRec = true, allCoord = true;
+            for (size_t fi = 0; fi < nf; ++fi) { allRec = allRec && hasRec(fi); allCoord = allCoord && ftimeCoord[fi]; }
+            if (!allRec) merged_ = true;
+            else if (allCoord) {
+                // Concatenate only when each file's records come after the previous file's.
+                bool ordered = true, have = false;
+                double last = 0;
+                for (size_t fi = 0; fi < nf && ordered; ++fi) {
+                    if (ftime[fi].empty()) continue;
+                    if (have && !(ftime[fi].front() > last)) ordered = false;
+                    last = ftime[fi].back();
+                    have = true;
+                }
+                merged_ = !ordered;
+            } else {
+                auto n0 = varNames(0);
+                for (size_t fi = 1; fi < nf && !merged_; ++fi) merged_ = varNames(fi) != n0;
+            }
+        }
+    }
+
+    if (!merged_) {
+        // Aggregate the record dimension across files.
+        if (nf > 1) {
+            if (recDim_ < 0) {
+                err = "multiple files given but the first file has no unlimited (record) dimension";
                 return false;
             }
-            nc_inq_dimlen(rg.ncid[fi], did, &f.recLen);
-            f.recStart = total;
-            total += f.recLen;
+            const GroupInfo& rg = groups_[dims_[recDim_].group];
+            size_t total = 0;
+            for (size_t fi = 0; fi < nf; ++fi) {
+                File& f = files_[fi];
+                if (!hasRec(fi)) {
+                    err = f.path + ": has no dimension '" + (rg.path.empty() ? "" : rg.path + "/") + dims_[recDim_].name + "'";
+                    return false;
+                }
+                f.recLen = dimLen[fi][recDim_];
+                f.recStart = total;
+                total += f.recLen;
+            }
+            dims_[recDim_].len = total;
+            dims_[recDim_].isRecord = true;
+        } else {
+            files_[0].recLen = recDim_ >= 0 ? dims_[recDim_].len : 0;
         }
-        dims_[recDim_].len = total;
+    } else if (recDim_ >= 0) {
+        // Common record axis: the time steps shared by all files that have the record dim.
+        // A file with no time step in common is left out of the intersection.
+        std::vector<double> common;
+        int ref = -1;
+        for (size_t fi = 0; fi < nf; ++fi) {
+            if (!hasRec(fi)) continue;
+            File& f = files_[fi];
+            const std::vector<double>& t = ftime[fi];
+            if (ref < 0) {
+                ref = (int)fi;
+                common = t;
+                f.tmap.resize(t.size());
+                for (size_t i = 0; i < t.size(); ++i) f.tmap[i] = i;
+                continue;
+            }
+            double spacing = 0;
+            for (size_t i = 1; i < common.size(); ++i) {
+                double d = std::fabs(common[i] - common[i - 1]);
+                if (d > 0 && (spacing == 0 || d < spacing)) spacing = d;
+            }
+            std::vector<std::pair<double, size_t>> sorted;
+            for (size_t i = 0; i < t.size(); ++i) sorted.emplace_back(t[i], i);
+            std::sort(sorted.begin(), sorted.end());
+            std::vector<char> keep(common.size(), 0);
+            std::vector<size_t> local;
+            for (size_t i = 0; i < common.size(); ++i) {
+                double c = common[i];
+                double tol = spacing > 0 ? 1e-3 * spacing : 1e-6 * std::max(1.0, std::fabs(c));
+                auto it = std::lower_bound(sorted.begin(), sorted.end(), std::make_pair(c - tol, size_t(0)));
+                if (it != sorted.end() && std::fabs(it->first - c) <= tol) { keep[i] = 1; local.push_back(it->second); }
+            }
+            if (local.empty()) {
+                f.timeOk = false;
+                notes_.push_back(baseName(f.path) + ": no time steps in common with " + baseName(files_[ref].path) +
+                                 "; its time-dependent variables are hidden");
+                continue;
+            }
+            auto filter = [&](std::vector<size_t>& m) {
+                std::vector<size_t> r;
+                for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) r.push_back(m[i]);
+                m.swap(r);
+            };
+            for (size_t pj = 0; pj < fi; ++pj) if (hasRec(pj) && files_[pj].timeOk) filter(files_[pj].tmap);
+            std::vector<double> c2;
+            for (size_t i = 0; i < keep.size(); ++i) if (keep[i]) c2.push_back(common[i]);
+            common.swap(c2);
+            f.tmap = local;
+        }
+        size_t refLen = ref >= 0 ? ftime[ref].size() : 0;
+        if (common.size() < refLen)
+            notes_.push_back(std::to_string(common.size()) + " of " + std::to_string(refLen) + " time steps of " +
+                             baseName(files_[ref].path) + " are common to all files");
+        dims_[recDim_].len = common.size();
         dims_[recDim_].isRecord = true;
-    } else if (!files_.empty()) {
-        files_[0].recLen = recDim_ >= 0 ? dims_[recDim_].len : 0;
     }
 
-    for (size_t gi = 0; gi < groups_.size(); ++gi) {
+    // Per file: do its dimensions agree with the combined ones (length; merge: coordinates)?
+    std::vector<std::map<int, bool>> dimOk(nf);
+    for (size_t di = 0; di < dims_.size(); ++di) {
+        if ((int)di == recDim_) { for (size_t fi = 0; fi < nf; ++fi) dimOk[fi][di] = true; continue; }
+        const DimInfo& d = dims_[di];
+        std::vector<double> refCoord;
+        bool refRead = false, refHas = false;
+        for (size_t fi = 0; fi < nf; ++fi) {
+            auto it = dimLen[fi].find((int)di);
+            if (it == dimLen[fi].end()) continue;
+            bool ok = it->second == d.len;
+            std::string why = ok ? "" : "length " + std::to_string(it->second) + " instead of " + std::to_string(d.len);
+            if (ok && merged_) {
+                std::vector<double> c;
+                bool has = readCoordVar(groups_[d.group].ncid[fi], d.name, d.len, c);
+                if (!refRead) { refRead = true; refHas = has; refCoord = c; }
+                else if (has && refHas && !sameValues(c, refCoord)) { ok = false; why = "different coordinate values"; }
+            }
+            dimOk[fi][di] = ok;
+            if (!ok) notes_.push_back(baseName(files_[fi].path) + ": dimension '" + d.name + "' has " + why +
+                                      "; its variables using it are hidden");
+        }
+    }
+    auto dimsOk = [&](size_t fi, const std::vector<int>& dl) {
+        for (int d : dl) if (!dimOk[fi][d]) return false;
+        return true;
+    };
+
+    std::map<std::string, int> byName;   // fullName -> index into vars_
+    for (size_t fi = 0; fi < (merged_ ? nf : 1); ++fi) {
+      for (size_t gi = 0; gi < groups_.size(); ++gi) {
         const GroupInfo& g = groups_[gi];
-        int gid = g.ncid[0];
+        int gid = g.ncid[fi];
         int nvars = 0;
-        if (nc_inq_varids(gid, &nvars, nullptr) != NC_NOERR || nvars <= 0) continue;
+        if (gid < 0 || nc_inq_varids(gid, &nvars, nullptr) != NC_NOERR || nvars <= 0) continue;
         std::vector<int> varids(nvars);
         nc_inq_varids(gid, &nvars, varids.data());
         for (int vid : varids) {
@@ -208,21 +402,67 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err) {
             v.type = type;
             bool ok = true;
             for (int k = 0; k < nd; ++k) {
-                auto it = dimIndex.find(vd[k]);
-                if (it == dimIndex.end()) { ok = false; break; }
+                auto it = dimMap[fi].find(vd[k]);
+                if (it == dimMap[fi].end()) { ok = false; break; }
                 v.dims.push_back(it->second);
             }
             if (!ok) continue;
-            v.isRecordVar = files_.size() > 1 && v.dims[0] == recDim_;
-            for (size_t fi = 0; fi < files_.size(); ++fi) {
-                int id = -1;
-                if (fi == 0) id = vid;
-                else if (v.isRecordVar && (g.ncid[fi] < 0 || nc_inq_varid(g.ncid[fi], name, &id) != NC_NOERR)) {
-                    err = files_[fi].path + ": variable '" + v.fullName + "' missing";
-                    return false;
+            const std::string fname = baseName(files_[fi].path);
+            if (nf > 1 && !dimsOk(fi, v.dims)) continue;   // noted per dimension above
+            v.varid.assign(nf, -1);
+            v.ncid.assign(nf, -1);
+            if (!merged_) {
+                v.isRecordVar = nf > 1 && v.dims[0] == recDim_;
+                for (size_t fj = 0; fj < nf; ++fj) {
+                    v.ncid[fj] = g.ncid[fj];
+                    if (fj == 0) { v.varid[0] = vid; continue; }
+                    if (!v.isRecordVar) continue;
+                    // A record variable must exist with the same dimensions in every file.
+                    int id = -1, nd2 = 0;
+                    int vd2[NC_MAX_VAR_DIMS];
+                    bool same = g.ncid[fj] >= 0 && nc_inq_varid(g.ncid[fj], name, &id) == NC_NOERR &&
+                                nc_inq_var(g.ncid[fj], id, nullptr, nullptr, &nd2, vd2, nullptr) == NC_NOERR && nd2 == nd;
+                    for (int k = 0; same && k < nd; ++k) {
+                        auto it = dimMap[fj].find(vd2[k]);
+                        same = it != dimMap[fj].end() && it->second == v.dims[k];
+                    }
+                    if (!same || !dimsOk(fj, v.dims)) {
+                        notes_.push_back("'" + v.fullName + "' hidden: missing or different in " + baseName(files_[fj].path));
+                        ok = false;
+                        break;
+                    }
+                    v.varid[fj] = id;
                 }
-                v.varid.push_back(id);
-                v.ncid.push_back(g.ncid[fi]);
+                if (!ok) continue;
+            } else {
+                v.file = (int)fi;
+                v.varid[fi] = vid;
+                v.ncid[fi] = gid;
+                auto rp = std::find(v.dims.begin(), v.dims.end(), recDim_);
+                if (rp != v.dims.end()) {
+                    const File& f = files_[fi];
+                    if (!f.timeOk) continue;   // already noted for the whole file
+                    bool identity = f.tmap.size() == dimLen[fi][recDim_];
+                    for (size_t i = 0; identity && i < f.tmap.size(); ++i) identity = f.tmap[i] == i;
+                    if (!identity && rp != v.dims.begin()) {
+                        notes_.push_back(fname + ": '" + v.fullName + "' hidden (record dimension is not its first dimension)");
+                        continue;
+                    }
+                    v.isRecordVar = !identity;
+                }
+                auto prev = byName.find(v.fullName);
+                if (prev != byName.end()) {
+                    const VarInfo& pv = vars_[prev->second];
+                    if (pv.dims == v.dims) {
+                        // Same variable on the same grid: keep the first (coordinates, duplicates).
+                        bool isCoord = nd == 1 && dims_[v.dims[0]].name == v.name;
+                        if (!isCoord)
+                            notes_.push_back(fname + ": '" + v.fullName + "' also in " +
+                                             baseName(files_[pv.file].path) + ", showing that one");
+                        continue;
+                    }
+                    v.fullName += " (" + fname + ")";   // same name, other dimensions: show both
+                }
             }
             v.longName = getTextAtt(gid, vid, "long_name");
             v.units = getTextAtt(gid, vid, "units");
@@ -241,8 +481,10 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err) {
             if (getNumAtt(gid, vid, "add_offset", a, 1)) v.offset = a[0];
             // A coordinate variable lives in the same group as its dimension.
             v.isCoordVar = nd == 1 && dims_[v.dims[0]].name == v.name && dims_[v.dims[0]].group == (int)gi;
+            byName.emplace(v.fullName, (int)vars_.size());
             vars_.push_back(std::move(v));
         }
+      }
     }
 
     loadCoords();
@@ -257,7 +499,7 @@ void Dataset::loadCoords() {
         for (size_t i = 0; i < d.len; ++i) d.coord[i] = (double)i;
         int v = -1;
         for (size_t k = 0; k < vars_.size(); ++k)
-            if (vars_[k].isCoordVar && vars_[k].dims[0] == (int)di) v = (int)k;
+            if (v < 0 && vars_[k].isCoordVar && vars_[k].dims[0] == (int)di) v = (int)k;
         std::string axis, stdName, positive;
         if (v >= 0 && d.len > 0) {
             std::vector<size_t> st{0}, ct{d.len};
@@ -265,7 +507,7 @@ void Dataset::loadCoords() {
             const VarInfo& cv = vars_[v];
             d.units = cv.units;
             d.longName = cv.longName;
-            int vid = cv.varid[0], ncid = cv.ncid[0];
+            int vid = cv.varid[fileOf(v)], ncid = cv.ncid[fileOf(v)];
             axis = lower(getTextAtt(ncid, vid, "axis"));
             stdName = lower(getTextAtt(ncid, vid, "standard_name"));
             positive = getTextAtt(ncid, vid, "positive");
@@ -301,10 +543,26 @@ bool Dataset::readRaw(int vi, const std::vector<size_t>& start, const std::vecto
         if (st != NC_NOERR && err) *err = v.name + ": " + nc_strerror(st);
         return st == NC_NOERR;
     };
-    if (!v.isRecordVar) return get(v.ncid[0], v.varid[0], start.data(), count.data(), 0);
+    const int vf = fileOf(vi);
+    if (!v.isRecordVar) return get(v.ncid[vf], v.varid[vf], start.data(), count.data(), 0);
 
     size_t inner = 1;
     for (size_t k = 1; k < count.size(); ++k) inner *= count[k];
+    if (v.file >= 0) {
+        // Merged file: map common record indices to this file's, reading runs of consecutive ones.
+        const std::vector<size_t>& m = files_[v.file].tmap;
+        std::vector<size_t> s = start, c = count;
+        for (size_t i = 0; i < count[0];) {
+            size_t l = m[start[0] + i], n = 1;
+            while (i + n < count[0] && m[start[0] + i + n] == l + n) ++n;
+            s[0] = l;
+            c[0] = n;
+            if (!get(v.ncid[vf], v.varid[vf], s.data(), c.data(), i * inner)) return false;
+            i += n;
+        }
+        return true;
+    }
+
     size_t lo0 = start[0], hi0 = start[0] + count[0];
     for (size_t fi = 0; fi < files_.size(); ++fi) {
         const File& f = files_[fi];
@@ -370,13 +628,15 @@ std::vector<std::pair<std::string, std::string>> Dataset::attrsOf(int ncid, int 
 std::vector<std::pair<std::string, std::string>> Dataset::attributes(int vi) const {
     if (vi < 0) return groupAttributes(0);
     std::lock_guard<std::mutex> lk(g_ncMutex);
-    return attrsOf(vars_[vi].ncid[0], vars_[vi].varid[0]);
+    return attrsOf(vars_[vi].ncid[fileOf(vi)], vars_[vi].varid[fileOf(vi)]);
 }
 
 std::vector<std::pair<std::string, std::string>> Dataset::groupAttributes(int g) const {
     std::lock_guard<std::mutex> lk(g_ncMutex);
     if (g < 0 || g >= (int)groups_.size()) return {};
-    return attrsOf(groups_[g].ncid[0], NC_GLOBAL);
+    for (int id : groups_[g].ncid)
+        if (id >= 0) return attrsOf(id, NC_GLOBAL);
+    return {};
 }
 
 } // namespace ncvpp

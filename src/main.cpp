@@ -29,12 +29,16 @@ static void usage() {
     std::printf(
         "ncview++ %s — fast netCDF viewer\n\n"
         "usage: ncview++ [options] file.nc [more.nc ...]\n"
-        "  Multiple files are concatenated along the record (unlimited) dimension.\n\n"
+        "  Multiple files are concatenated along the record (unlimited) dimension when their\n"
+        "  times follow each other, and merged otherwise: variables of all files side by side,\n"
+        "  showing only those on matching dimensions and the time steps common to all files.\n\n"
         "options:\n"
         "  -v, --var NAME        variable to show first\n"
         "  -c, --cmap NAME       colormap (3gauss, detail, ssec, bright, jet, bw, ...)\n"
         "      --min V --max V   fixed colour range\n"
         "  -f, --frame N         start at frame N of the animation dimension\n"
+        "      --concat          always concatenate multiple files along the record dimension\n"
+        "      --merge           always merge multiple files (variables side by side)\n"
         "      --coasts          start with the coastline overlay on\n"
         "      --cache MB        slice cache size (default 1024)\n"
         "      --software        force software rendering (default over ssh)\n"
@@ -64,6 +68,8 @@ static bool parseArgs(int argc, char** argv, Options& o) {
         else if (a == "-f" || a == "--frame") o.frame = std::atoi(next("--frame"));
         else if (a == "--cache") o.cacheMB = (size_t)std::atol(next("--cache"));
         else if (a == "--coasts") o.coasts = true;
+        else if (a == "--concat") o.multi = MultiFile::Concat;
+        else if (a == "--merge") o.multi = MultiFile::Merge;
         else if (a == "--software") o.renderer = "software";
         else if (a == "--renderer") o.renderer = next("--renderer");
         else if (a == "--dump") o.dump = next("--dump");
@@ -157,7 +163,8 @@ int main(int argc, char** argv) {
 
     Dataset ds;
     std::string err;
-    if (!ds.open(opt.files, err)) { std::fprintf(stderr, "ncview++: %s\n", err.c_str()); return 1; }
+    if (!ds.open(opt.files, err, opt.multi)) { std::fprintf(stderr, "ncview++: %s\n", err.c_str()); return 1; }
+    for (const auto& n : ds.notes()) std::fprintf(stderr, "ncview++: %s\n", n.c_str());
     if (ds.vars().empty()) { std::fprintf(stderr, "ncview++: no displayable variables\n"); return 1; }
     if (!opt.dump.empty()) return dumpPPM(ds, opt);
 

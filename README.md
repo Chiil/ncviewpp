@@ -14,6 +14,9 @@ View only: no editing or printing.
 - CF time decoding for all CF calendars (standard, proleptic_gregorian, julian, noleap, all_leap, 360_day)
 - `_FillValue`, `missing_value`, `valid_range`, `scale_factor`/`add_offset`
 - Multiple files concatenated along the record (unlimited) dimension: `ncview++ run_*.nc`
+- Multiple files with different variables merged side by side: `ncview++ u.nc v.nc stats.nc`.
+  Only variables on matching dimensions (same length and coordinates) are shown, on the time
+  steps common to all files. Chosen automatically; force with `--concat` or `--merge`
 - The 24 ncview colormaps, invert, linear/low/high/log transforms
 - Colour range: sampled auto-range (like ncview), current frame, or exact scan of all frames
 - Zoom (mouse wheel) and pan (drag), pixel-exact or smooth display, fit/1:1

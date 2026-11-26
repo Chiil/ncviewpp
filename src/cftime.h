@@ -21,6 +21,11 @@ public:
     DateTime decode(double value) const;
     std::string format(double value) const;   // "YYYY-MM-DD HH:MM[:SS]"
     Calendar calendar() const { return cal_; }
+    // Converts a value in these units to the units of `to` (both valid, same calendar).
+    double convertTo(double value, const CFTime& to) const {
+        return ((double)(refDay_ - to.refDay_) * 86400.0 + (refSecOfDay_ - to.refSecOfDay_) +
+                value * unitSeconds_) / to.unitSeconds_;
+    }
 
     // Exposed for tests.
     static int64_t dayNumber(Calendar c, int64_t y, int m, int d);

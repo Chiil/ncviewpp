@@ -27,6 +27,7 @@ struct Options {
     std::string dump;              // test hook: render the first slice to PPM and exit
     bool coasts = false;           // start with coastline overlay
     int frame = 0;                 // initial frame index along the animation dim
+    MultiFile multi = MultiFile::Auto;   // how several files are combined
 };
 
 class App {
