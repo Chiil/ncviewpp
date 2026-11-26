@@ -815,21 +815,34 @@ void App::drawToolbar() {
 
 void App::drawCanvas(ImVec2 size) {
     ImGuiIO& io = ImGui::GetIO();
-    ImVec2 c0 = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
-    bool hov = ImGui::IsItemHovered();
+    const ImVec2 c0 = ImGui::GetCursorScreenPos();
+    const ImVec2 full = size;
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(c0, ImVec2(c0.x + size.x, c0.y + size.y), IM_COL32(40, 40, 44, 255));
     hoverValid_ = false;
     if (!shown_ || !tex_) {
+        ImGui::InvisibleButton("##canvas", size);
+        dl->AddRectFilled(c0, ImVec2(c0.x + size.x, c0.y + size.y), IM_COL32(40, 40, 44, 255));
         const char* msg = (shown_ && !shown_->error.empty()) ? shown_->error.c_str() : "loading...";
         dl->AddText(ImVec2(c0.x + 10, c0.y + 10), ImGui::GetColorU32(ImGuiCol_Text), msg);
         return;
     }
     const float nx = (float)shown_->nx, ny = (float)shown_->ny;
-    const float fitS = std::min(size.x / nx, size.y / ny);
+    const float fitS = std::min(full.x / nx, full.y / ny);
     if (zoom_ < 0) zoom_ = 1.0f / fitS;  // 1:1 (one data cell per pixel)
     if (fit_) { zoom_ = 1; cx_ = nx * 0.5f; cy_ = ny * 0.5f; }
+
+    // Reserve room for scrollbars when the zoomed image is larger than the view.
+    const float sb = ImGui::GetStyle().ScrollbarSize;
+    bool hbar = false, vbar = false;
+    for (int it = 0; it < 2; ++it) {
+        hbar = nx * fitS * zoom_ > full.x - (vbar ? sb : 0) + 0.5f;
+        vbar = ny * fitS * zoom_ > full.y - (hbar ? sb : 0) + 0.5f;
+    }
+    size = ImVec2(full.x - (vbar ? sb : 0), full.y - (hbar ? sb : 0));
+
+    ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+    bool hov = ImGui::IsItemHovered();
+    dl->AddRectFilled(c0, ImVec2(c0.x + size.x, c0.y + size.y), IM_COL32(40, 40, 44, 255));
     float s = fitS * zoom_;
     const ImVec2 mid(c0.x + size.x * 0.5f, c0.y + size.y * 0.5f);
     auto toScreen = [&](float u, float v) { return ImVec2(mid.x + (u - cx_) * s, mid.y + (v - cy_) * s); };
@@ -856,14 +869,51 @@ void App::drawCanvas(ImVec2 size) {
     }
     if (hov && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) fit_ = true;
 
-    // Image (nearest-neighbour unless smoothing is on).
+    // Scrollbars: thumb shows the visible part of the image; drag it or click the track to move.
+    auto scrollbar = [&](const char* id, bool horiz, float& center, float n) {
+        const ImVec2 p0 = horiz ? ImVec2(c0.x, c0.y + size.y) : ImVec2(c0.x + size.x, c0.y);
+        const float len = horiz ? size.x : size.y;
+        const float view = len / s;                       // visible extent in data cells
+        const float total = std::max(n, view);
+        const float lo = std::clamp(center - view * 0.5f, 0.f, total - view);
+        const float tLen = std::max(sb, len * view / total);
+        const float tPos = (len - tLen) * (total > view ? lo / (total - view) : 0.f);
+        ImGui::SetCursorScreenPos(p0);
+        ImGui::InvisibleButton(id, horiz ? ImVec2(len, sb) : ImVec2(sb, len));
+        const bool active = ImGui::IsItemActive(), hovered = ImGui::IsItemHovered();
+        if (active) {
+            fit_ = false;
+            const float m = horiz ? io.MousePos.x - p0.x : io.MousePos.y - p0.y;
+            const float mPrev = m - (horiz ? io.MouseDelta.x : io.MouseDelta.y);
+            if (ImGui::IsItemActivated() && (mPrev < tPos || mPrev > tPos + tLen))
+                center = (m / len) * total;  // jump to click on the track
+            else if (len > tLen)
+                center = lo + view * 0.5f + (m - mPrev) * (total - view) / (len - tLen);
+        }
+        const ImVec2 q0 = horiz ? ImVec2(p0.x + tPos, p0.y + 2) : ImVec2(p0.x + 2, p0.y + tPos);
+        const ImVec2 q1 = horiz ? ImVec2(q0.x + tLen, p0.y + sb - 2) : ImVec2(p0.x + sb - 2, q0.y + tLen);
+        dl->AddRectFilled(p0, horiz ? ImVec2(p0.x + len, p0.y + sb) : ImVec2(p0.x + sb, p0.y + len), ImGui::GetColorU32(ImGuiCol_ScrollbarBg));
+        dl->AddRectFilled(q0, q1, ImGui::GetColorU32(active ? ImGuiCol_ScrollbarGrabActive : hovered ? ImGuiCol_ScrollbarGrabHovered : ImGuiCol_ScrollbarGrab),
+                          ImGui::GetStyle().ScrollbarRounding);
+    };
+    if (hbar) scrollbar("##hscroll", true, cx_, nx);
+    if (vbar) scrollbar("##vscroll", false, cy_, ny);
+    ImGui::SetCursorScreenPos(c0);
+    ImGui::Dummy(full);
+
+    // Image (nearest-neighbour unless smoothing is on). Only the visible part is submitted:
+    // a quad with corners far off-screen at high zoom is dropped by some renderers.
     const float d = (float)rp_.decim;
-    ImVec2 pa = toScreen(0, 0), pb = toScreen(texW_ * d, texH_ * d);
+    const float iw = texW_ * d, ih = texH_ * d;   // image extent in data cells
+    const float u0 = std::max(0.f, cx_ - size.x * 0.5f / s), u1 = std::min(iw, cx_ + size.x * 0.5f / s);
+    const float v0 = std::max(0.f, cy_ - size.y * 0.5f / s), v1 = std::min(ih, cy_ + size.y * 0.5f / s);
     dl->PushClipRect(c0, ImVec2(c0.x + size.x, c0.y + size.y), true);
     const ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
-    if (!smooth_ && pio.DrawCallback_SetSamplerNearest) dl->AddCallback(pio.DrawCallback_SetSamplerNearest, nullptr);
-    dl->AddImage((ImTextureID)(intptr_t)tex_, pa, pb);
-    if (!smooth_ && pio.DrawCallback_SetSamplerLinear) dl->AddCallback(pio.DrawCallback_SetSamplerLinear, nullptr);
+    if (u1 > u0 && v1 > v0) {
+        if (!smooth_ && pio.DrawCallback_SetSamplerNearest) dl->AddCallback(pio.DrawCallback_SetSamplerNearest, nullptr);
+        dl->AddImage((ImTextureID)(intptr_t)tex_, toScreen(u0, v0), toScreen(u1, v1), ImVec2(u0 / iw, v0 / ih), ImVec2(u1 / iw, v1 / ih));
+        if (!smooth_ && pio.DrawCallback_SetSamplerLinear) dl->AddCallback(pio.DrawCallback_SetSamplerLinear, nullptr);
+    }
 
     // Hover → data cell.
     if (hov) {
