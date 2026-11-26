@@ -802,9 +802,7 @@ void App::drawToolbar() {
     ImGui::SameLine();
     if (ImGui::Button("fit")) fit_ = true;
     ImGui::SameLine();
-    ImGui::BeginDisabled(fit_);
-    if (ImGui::Button("1:1")) zoom_ = -1;   // resolved in drawCanvas
-    ImGui::EndDisabled();
+    if (ImGui::Button("1:1")) { fit_ = false; zoom_ = -1; }   // resolved in drawCanvas
     ImGui::SameLine();
     ImGui::Checkbox("plot", &showPlot_);
     ImGui::SameLine();
