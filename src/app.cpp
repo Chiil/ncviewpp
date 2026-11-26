@@ -147,13 +147,7 @@ void App::selectVar(int v) {
     if (shownKey_.var >= 0 && xd_ >= 0 && yd_ >= 0 && shown_ &&
         shown_->nx == shape[xd_] && shown_->ny == shape[yd_]) sameGrid = true;
 
-    // Animation dim: prefer a time dim, else the first remaining dim with length > 1.
-    animd_ = -1;
-    for (size_t i = 0; i < shape.size(); ++i)
-        if ((int)i != xd_ && (int)i != yd_ && shape[i] > 1 && ds_.dims()[vi.dims[i]].kind == AxisKind::Time) { animd_ = (int)i; break; }
-    for (size_t i = 0; animd_ < 0 && i < shape.size(); ++i)
-        if ((int)i != xd_ && (int)i != yd_ && shape[i] > 1) animd_ = (int)i;
-    if (vi.dims.size() == 1) animd_ = -1;
+    pickAnimDim();
     plotDim_ = animd_ >= 0 ? animd_ : (xd_ >= 0 ? xd_ : 0);
 
     loader_.dropPrefetch();
@@ -168,23 +162,113 @@ void App::selectVar(int v) {
         lines_.clear();
         line1d_.reset();
     }
-    if (vi.dims.size() == 1) {
-        auto L = std::make_shared<PlotLine>();
-        L->var = v; L->dim = 0; L->pos = {0};
+    if (vi.dims.size() == 1) load1d();
+    else startScan(false);
+}
+
+// Animation dim: prefer a time dim, else the first remaining dim with length > 1.
+void App::pickAnimDim() {
+    animd_ = -1;
+    const VarInfo& vi = ds_.vars()[var_];
+    const auto shape = ds_.shape(var_);
+    if (vi.dims.size() == 1) return;
+    for (size_t i = 0; i < shape.size(); ++i)
+        if ((int)i != xd_ && (int)i != yd_ && shape[i] > 1 && ds_.dims()[vi.dims[i]].kind == AxisKind::Time) { animd_ = (int)i; break; }
+    for (size_t i = 0; animd_ < 0 && i < shape.size(); ++i)
+        if ((int)i != xd_ && (int)i != yd_ && shape[i] > 1) animd_ = (int)i;
+}
+
+// Whole-variable plot of a 1-D variable.
+void App::load1d() {
+    auto L = std::make_shared<PlotLine>();
+    L->var = var_; L->dim = 0; L->pos = {0};
+    {
+        std::lock_guard<std::mutex> lk(plotMutex_);
         line1d_ = L;
-        size_t len = shape[0];
-        loader_.submit([this, L, len] {
-            std::vector<float> buf;
-            ds_.read(L->var, {0}, {len}, buf);
-            std::lock_guard<std::mutex> lk(plotMutex_);
-            L->series.x = ds_.dims()[ds_.vars()[L->var].dims[0]].coord;
-            L->series.y.assign(buf.begin(), buf.end());
-            L->series.color = kLineColors[0];
-            L->ready = true;
-        });
-    } else {
-        startScan(false);
     }
+    size_t len = ds_.shape(var_)[0];
+    loader_.submit([this, L, len] {
+        std::vector<float> buf;
+        ds_.read(L->var, {0}, {len}, buf);
+        std::lock_guard<std::mutex> lk(plotMutex_);
+        L->series.x = ds_.dims()[ds_.vars()[L->var].dims[0]].coord;
+        L->series.y.assign(buf.begin(), buf.end());
+        L->series.color = kLineColors[0];
+        L->ready = true;
+    });
+}
+
+// Reopens the files to pick up new data (e.g. frames written by a running simulation) and
+// restores the view, including the current frame and the colour range.
+void App::reload() {
+    // Variables and dimensions are matched by name: their indices may change.
+    std::string varName;
+    std::vector<std::string> dimNames;
+    std::vector<size_t> oldShape;
+    if (var_ >= 0) {
+        varName = ds_.vars()[var_].fullName;
+        for (int d : ds_.vars()[var_].dims) dimNames.push_back(ds_.dims()[d].name);
+        oldShape = ds_.shape(var_);
+    }
+    const size_t oldLen = animd_ >= 0 ? oldShape[animd_] : 1;
+    {
+        std::lock_guard<std::mutex> lk(scanMutex_);   // a running range scan is dropped
+        scan_.reset();
+        ++scanGen_;
+    }
+    loader_.clear();   // no reads may run while the files are reopened
+
+    std::string err;
+    if (!ds_.reload(err)) {
+        reloadMsg_ = "reload failed: " + err;
+        reloadMsgT_ = nowSec();
+        SDL_Log("ncview++: %s", reloadMsg_.c_str());
+        return;
+    }
+    for (const auto& n : ds_.notes()) SDL_Log("ncview++: %s", n.c_str());
+    dimPos_.clear();   // keyed by dim index
+    ovKey_.clear();
+    renderDirty_ = true;
+    version_++;
+    reloadMsgT_ = nowSec();
+
+    int v = varName.empty() ? -1 : ds_.findVar(varName);
+    std::vector<std::string> newNames;
+    if (v >= 0)
+        for (int d : ds_.vars()[v].dims) newNames.push_back(ds_.dims()[d].name);
+    if (v < 0 || newNames != dimNames) {
+        // The variable is gone or changed shape: start over.
+        var_ = -1;
+        shown_.reset();
+        selectVar(v >= 0 ? v : 0);
+        reloadMsg_ = v < 0 ? "reloaded; '" + varName + "' no longer exists" : "reloaded";
+        return;
+    }
+
+    var_ = v;
+    shownKey_.var = v;   // keep showing the old image until the new one is read
+    const auto shape = ds_.shape(v);
+    for (size_t i = 0; i < pos_.size(); ++i) pos_[i] = std::min(pos_[i], shape[i] ? shape[i] - 1 : 0);
+    if (animd_ < 0) {
+        // A dimension may have grown beyond one step: it can be animated now.
+        pickAnimDim();
+        if (animd_ >= 0 && (plotDim_ == xd_ || plotDim_ == yd_)) plotDim_ = animd_;
+    }
+
+    if (animd_ >= 0) {
+        const size_t len = shape[animd_];
+        const std::string& n = ds_.dims()[ds_.vars()[v].dims[animd_]].name;
+        reloadMsg_ = len == oldLen ? "reloaded, no new " + n + " steps"
+                                   : "reloaded, " + n + ": " + std::to_string(oldLen) + " -> " + std::to_string(len);
+    } else {
+        reloadMsg_ = "reloaded";
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(plotMutex_);
+        for (auto& L : lines_) L->var = -1;   // re-read in reloadPlotLines()
+    }
+    if (ds_.vars()[v].dims.size() == 1) load1d();
 }
 
 SliceKey App::currentKey() const {
@@ -429,7 +513,8 @@ void App::handleKeys() {
     }
     if (pressed(ImGuiKey_I)) { rp_.invert = !rp_.invert; renderDirty_ = true; }
     if (pressed(ImGuiKey_T)) { rp_.transform = Transform(((int)rp_.transform + 1) % 4); renderDirty_ = true; }
-    if (pressed(ImGuiKey_R) && shown_ && shown_->anyValid) {
+    if (pressed(ImGuiKey_F5) || (io.KeyCtrl && pressed(ImGuiKey_R))) reload();
+    else if (pressed(ImGuiKey_R) && shown_ && shown_->anyValid) {
         vmin_ = shown_->vmin; vmax_ = shown_->vmax; rangeUser_ = true; renderDirty_ = true;
     }
     if (pressed(ImGuiKey_A)) { rangeUser_ = false; startScan(false); }
@@ -728,9 +813,15 @@ void App::drawToolbar() {
         ImGui::SameLine();
         ImGui::Text("%s = %s  (%zu/%zu)", d.name.c_str(), d.format(pos_[animd_]).c_str(), pos_[animd_] + 1, d.len);
     }
+    ImGui::SameLine();
+    if (ImGui::Button("reload")) reload();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reopen the files to pick up new data (F5, ctrl-r)");
     if (loading_ || loader_.busy()) {
         ImGui::SameLine();
         ImGui::TextDisabled(loading_ ? "loading..." : "reading...");
+    } else if (!reloadMsg_.empty() && nowSec() - reloadMsgT_ < 5) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", reloadMsg_.c_str());
     }
 
     if (!isImageVar()) return;

@@ -90,6 +90,7 @@ desktop, set `SDL_VIDEO_DRIVER=x11`.
 | o | coastlines on/off |
 | f, + / - | fit, zoom |
 | p | plot window |
+| F5 / ctrl-r | reload the files (picks up new frames; keeps frame and colour range) |
 | q | quit |
 
 Mouse: wheel zooms, drag pans, click plots a series, ctrl/shift-click adds a series,

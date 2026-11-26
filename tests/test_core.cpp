@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <string>
 
+#include <netcdf.h>
+
 #include "cftime.h"
 #include "dataset.h"
 #include "loader.h"
@@ -241,6 +243,54 @@ static void testMerge(const std::string& dir) {
     EXPECT(f.shape(f.findVar("tas"))[0] == 10);
 }
 
+// A running simulation appends records while the file is open in the viewer.
+static void testReload(const std::string& dir) {
+    for (int fmt : {NC_CLOBBER, NC_CLOBBER | NC_NETCDF4}) {
+        std::string path = dir + (fmt & NC_NETCDF4 ? "/grow4.nc" : "/grow3.nc");
+        int nc, dt, dx, vt, vu;
+        EXPECT(nc_create(path.c_str(), fmt, &nc) == NC_NOERR);
+        nc_def_dim(nc, "time", NC_UNLIMITED, &dt);
+        nc_def_dim(nc, "x", 4, &dx);
+        int dims[2] = {dt, dx};
+        nc_def_var(nc, "time", NC_DOUBLE, 1, &dt, &vt);
+        nc_def_var(nc, "u", NC_FLOAT, 2, dims, &vu);
+        nc_enddef(nc);
+        auto write = [&](size_t t) {
+            double tv = 10.0 * t;
+            float row[4] = {float(t), float(t), float(t), float(t)};
+            size_t s[2] = {t, 0}, c[2] = {1, 4};
+            nc_put_vara_double(nc, vt, s, c, &tv);
+            nc_put_vara_float(nc, vu, s, c, row);
+            nc_sync(nc);
+        };
+        write(0);
+        write(1);
+
+        Dataset ds;
+        std::string err;
+        EXPECT(ds.open({path}, err));
+        int u = ds.findVar("u");
+        EXPECT(u >= 0 && ds.shape(u)[0] == 2);
+        write(2);
+        write(3);
+        EXPECT(ds.reload(err));
+        u = ds.findVar("u");
+        EXPECT(u >= 0 && ds.shape(u)[0] == 4);
+        std::vector<float> out;
+        EXPECT(ds.read(u, {3, 0}, {1, 4}, out) && out[0] == 3.f);
+        EXPECT(ds.dims()[ds.vars()[u].dims[0]].coord.back() == 30.0);
+        nc_close(nc);
+
+        // A failed reload leaves the dataset usable for another try.
+        std::string moved = path + ".moved";
+        std::rename(path.c_str(), moved.c_str());
+        EXPECT(!ds.reload(err));
+        EXPECT(!ds.read(u, {0, 0}, {1, 4}, out));
+        std::rename(moved.c_str(), path.c_str());
+        EXPECT(ds.reload(err) && ds.read(u, {0, 0}, {1, 4}, out) && out[0] == 0.f);
+    }
+}
+
 static void bench(const std::string& path) {
     Dataset ds;
     std::string err;
@@ -272,6 +322,7 @@ int main(int argc, char** argv) {
     testDataset(dir);
     testGroups(dir);
     testMerge(dir);
+    testReload(dir);
     bench(dir + "/big.nc");
     std::printf(fails ? "%d FAILURES\n" : "all tests passed\n", fails);
     return fails ? 1 : 0;

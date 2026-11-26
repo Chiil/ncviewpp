@@ -61,6 +61,9 @@ private:
     };
 
     void selectVar(int v);
+    void pickAnimDim();
+    void load1d();
+    void reload();
     void defaultAxes();
     void autoFlip();
     SliceKey currentKey() const;
@@ -136,6 +139,10 @@ private:
     std::mutex plotMutex_;
     std::vector<std::shared_ptr<PlotLine>> lines_;
     std::shared_ptr<PlotLine> line1d_;   // whole-variable plot for 1-D variables
+
+    // Reload
+    std::string reloadMsg_;
+    double reloadMsgT_ = 0;
 
     // UI
     bool showInfo_ = false;

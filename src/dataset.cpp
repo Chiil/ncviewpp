@@ -143,6 +143,7 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err, Mult
     // A larger chunk cache makes stepping through compressed netCDF-4 data much faster.
     nc_set_chunk_cache(256u << 20, 4133, 0.75f);
     paths_ = paths;
+    mode_ = mode;
     for (const auto& p : paths) {
         File f; f.path = p;
         int st = nc_open(p.c_str(), NC_NOWRITE, &f.ncid);
@@ -491,6 +492,28 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err, Mult
     return true;
 }
 
+bool Dataset::reload(std::string& err) {
+    // Close first: HDF5 shares an already-open file between handles, so opening it again
+    // while the old handle lives would return the stale cached metadata.
+    {
+        std::lock_guard<std::mutex> lk(g_ncMutex);
+        for (auto& f : files_) if (f.ncid >= 0) nc_close(f.ncid);
+        for (auto& f : files_) f.ncid = -1;
+        closed_ = true;
+    }
+    Dataset fresh;
+    if (!fresh.open(paths_, err, mode_)) return false;
+    std::swap(files_, fresh.files_);
+    std::swap(groups_, fresh.groups_);
+    std::swap(dims_, fresh.dims_);
+    std::swap(vars_, fresh.vars_);
+    std::swap(notes_, fresh.notes_);
+    recDim_ = fresh.recDim_;
+    merged_ = fresh.merged_;
+    closed_ = false;
+    return true;   // fresh now owns the closed old handles (all -1)
+}
+
 void Dataset::loadCoords() {
     // Called with g_ncMutex held; readRaw does not lock.
     for (size_t di = 0; di < dims_.size(); ++di) {
@@ -536,6 +559,10 @@ void Dataset::loadCoords() {
 bool Dataset::readRaw(int vi, const std::vector<size_t>& start, const std::vector<size_t>& count,
                       float* fout, double* dout, std::string* err) const {
     const VarInfo& v = vars_[vi];
+    if (closed_) {
+        if (err) *err = "files closed after a failed reload; reload again";
+        return false;
+    }
     auto get = [&](int ncid, int varid, const size_t* s, const size_t* c, size_t offset) {
         int st = fout ? nc_get_vara_float(ncid, varid, s, c, fout + offset)
                       : nc_get_vara_double(ncid, varid, s, c, dout + offset);

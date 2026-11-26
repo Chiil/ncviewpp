@@ -65,6 +65,10 @@ public:
     Dataset& operator=(const Dataset&) = delete;
 
     bool open(const std::vector<std::string>& paths, std::string& err, MultiFile mode = MultiFile::Auto);
+    // Closes and reopens the same files to pick up data appended since (e.g. by a running
+    // simulation). Not thread-safe: no reads may be in flight. On failure the files stay
+    // closed (reads fail) until a later reload succeeds.
+    bool reload(std::string& err);
 
     const std::vector<GroupInfo>& groups() const { return groups_; }
     const std::vector<DimInfo>& dims() const { return dims_; }
@@ -110,6 +114,8 @@ private:
     std::vector<std::string> notes_;
     int recDim_ = -1;
     bool merged_ = false;
+    bool closed_ = false;              // files closed by a failed reload
+    MultiFile mode_ = MultiFile::Auto;
 };
 
 } // namespace ncvpp

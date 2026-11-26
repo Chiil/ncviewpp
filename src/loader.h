@@ -52,6 +52,7 @@ public:
     SliceP get(const SliceKey& key);                 // cached slice or null
     void request(const SliceKey& key, bool urgent);  // queue a load (no-op if cached/pending)
     void dropPrefetch();                             // forget queued non-urgent loads
+    void clear();                                    // drop all jobs and the cache; waits for the running job
     void submit(std::function<void()> job);          // run arbitrary job on the I/O thread
     bool busy() const { return busy_.load(); }
     void shutdown();                                 // stop the I/O thread (idempotent)
@@ -66,7 +67,8 @@ private:
     const Dataset& ds_;
     size_t cap_, bytes_ = 0;
     std::mutex m_;
-    std::condition_variable cv_;
+    std::condition_variable cv_, idle_;
+    bool running_ = false;
     std::deque<Job> q_;
     std::unordered_map<SliceKey, int, SliceKeyHash> pending_;
     std::list<SliceKey> lru_;

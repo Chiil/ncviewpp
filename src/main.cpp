@@ -47,7 +47,7 @@ static void usage() {
         "  -h, --help            this help\n\n"
         "keys: space play/pause, left/right step (shift: x10), home/end, up/down variable,\n"
         "      c/C colormap, i invert, t transform, r range=frame, a auto range, o coasts,\n"
-        "      f fit, +/- zoom, p plot window, q quit. Mouse: wheel zoom, drag pan,\n"
+        "      f fit, +/- zoom, p plot window, F5/ctrl-r reload, q quit. Mouse: wheel zoom, drag pan,\n"
         "      click plot, ctrl-click add line, double-click fit.\n",
         NCVPP_VERSION);
 }

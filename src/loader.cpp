@@ -94,6 +94,19 @@ void Loader::dropPrefetch() {
     }
 }
 
+void Loader::clear() {
+    std::unique_lock<std::mutex> lk(m_);
+    q_.clear();
+    pending_.clear();
+    idle_.wait(lk, [this] { return !running_; });
+    q_.clear();          // the job that was running may have queued a follow-up
+    pending_.clear();
+    cache_.clear();
+    lru_.clear();
+    bytes_ = 0;
+    busy_ = false;
+}
+
 void Loader::submit(std::function<void()> job) {
     std::lock_guard<std::mutex> lk(m_);
     Job j;
@@ -126,6 +139,7 @@ void Loader::run() {
             j = std::move(q_.front());
             q_.pop_front();
             busy_ = true;
+            running_ = true;
         }
         if (j.isSlice) {
             SliceP s = readSlice(ds_, j.key);
@@ -138,7 +152,9 @@ void Loader::run() {
         {
             std::lock_guard<std::mutex> lk(m_);
             busy_ = !q_.empty();
+            running_ = false;
         }
+        idle_.notify_all();
         if (onDone) onDone();
     }
 }
