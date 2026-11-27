@@ -97,8 +97,9 @@ target_link_libraries(imgui PUBLIC ${NCVPP_SDL_TARGET})
 
 # ---------------------------------------------------------------- core (no GUI)
 add_library(ncvpp_core STATIC
-  src/cftime.cpp src/dataset.cpp src/loader.cpp src/render.cpp src/overlay.cpp)
+  src/cftime.cpp src/dataset.cpp src/loader.cpp src/render.cpp src/overlay.cpp src/export.cpp)
 target_include_directories(ncvpp_core PUBLIC src)
+target_include_directories(ncvpp_core PRIVATE third_party ${IMGUI_DIR})
 target_link_libraries(ncvpp_core PUBLIC ${NCVPP_NC_TARGET} Threads::Threads)
 
 # ---------------------------------------------------------------- app

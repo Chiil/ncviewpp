@@ -6,18 +6,6 @@
 
 namespace ncvpp {
 
-std::vector<double> niceTicks(double lo, double hi, int target) {
-    std::vector<double> t;
-    if (!(hi > lo) || !std::isfinite(lo) || !std::isfinite(hi)) { t.push_back(lo); return t; }
-    double raw = (hi - lo) / std::max(1, target);
-    double mag = std::pow(10.0, std::floor(std::log10(raw)));
-    double r = raw / mag;
-    double step = (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag;
-    for (double v = std::ceil(lo / step) * step; v <= hi + step * 1e-9; v += step)
-        t.push_back(std::fabs(v) < step * 1e-9 ? 0.0 : v);
-    return t;
-}
-
 static std::string fmtTick(double v) {
     char b[32];
     std::snprintf(b, sizeof b, "%.6g", v);

@@ -64,6 +64,7 @@ private:
     void pickAnimDim();
     void load1d();
     void reload();
+    void exportImage();
     void defaultAxes();
     void autoFlip();
     SliceKey currentKey() const;
@@ -140,9 +141,9 @@ private:
     std::vector<std::shared_ptr<PlotLine>> lines_;
     std::shared_ptr<PlotLine> line1d_;   // whole-variable plot for 1-D variables
 
-    // Reload
-    std::string reloadMsg_;
-    double reloadMsgT_ = 0;
+    // Transient status message (reload, export)
+    std::string statusMsg_;
+    double statusMsgT_ = 0;
 
     // UI
     bool showInfo_ = false;

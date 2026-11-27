@@ -91,6 +91,7 @@ desktop, set `SDL_VIDEO_DRIVER=x11`.
 | f, + / - | fit, zoom |
 | p | plot window |
 | F5 / ctrl-r | reload the files (picks up new frames; keeps frame and colour range) |
+| ctrl-s | export the current frame as `<var>_<frame>.png` in the working directory: full domain at native resolution (upscaled to at least 1800 px), with axes, ticks, labels, title and colour bar, white background, 300 dpi |
 | q | quit |
 
 Mouse: wheel zooms, drag pans, click plots a series, ctrl/shift-click adds a series,
@@ -102,9 +103,10 @@ double-click fits.
 ./build/make_testdata build --big   # synthetic files incl. an ERA5-sized one
 ./build/test_core build             # correctness tests + benchmark
 ./build/ncview++ --dump out.ppm -v tas build/tas_all.nc   # headless render
+./build/ncview++ --dump out.png -v tas build/tas_all.nc   # headless PNG figure with axes
 ```
 
 ## License
 
 GPL-3.0 (see `COPYING`). The colormaps and coastline data come from ncview © David W. Pierce.
-Dear ImGui is MIT licensed. The Roboto font is Apache-2.0.
+Dear ImGui is MIT licensed. stb_image_write is public domain. The Roboto font is Apache-2.0.

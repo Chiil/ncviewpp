@@ -40,4 +40,7 @@ float applyTransform(Transform t, float x);
 // Renders slice into out (row-major RGBA, outW x outH). Multi-threaded for big slices.
 void renderSlice(const Slice& s, const RenderParams& p, std::vector<uint32_t>& out, int& outW, int& outH);
 
+// "Nice" tick positions covering [lo, hi].
+std::vector<double> niceTicks(double lo, double hi, int target);
+
 } // namespace ncvpp

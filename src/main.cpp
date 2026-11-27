@@ -14,7 +14,7 @@
 #endif
 
 #include "app.h"
-#include "data/font_roboto.h"
+#include "export.h"
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
@@ -43,11 +43,12 @@ static void usage() {
         "      --cache MB        slice cache size (default 1024)\n"
         "      --software        force software rendering (default over ssh)\n"
         "      --renderer NAME   SDL render driver (opengl, vulkan, metal, gpu, software)\n"
-        "      --dump OUT.ppm    render the first frame to a PPM image and exit (no display needed)\n"
+        "      --dump OUT.ppm|png render the first frame to an image and exit (no display needed);\n"
+        "                        .png gives a figure with axes, labels and colour bar\n"
         "  -h, --help            this help\n\n"
         "keys: space play/pause, left/right step (shift: x10), home/end, up/down variable,\n"
         "      c/C colormap, i invert, t transform, r range=frame, a auto range, o coasts,\n"
-        "      f fit, +/- zoom, p plot window, F5/ctrl-r reload, q quit. Mouse: wheel zoom, drag pan,\n"
+        "      f fit, +/- zoom, p plot window, F5/ctrl-r reload, ctrl-s export PNG, q quit. Mouse: wheel zoom, drag pan,\n"
         "      click plot, ctrl-click add line, double-click fit.\n",
         NCVPP_VERSION);
 }
@@ -101,6 +102,17 @@ static int dumpPPM(Dataset& ds, const Options& o) {
     p.vmin = o.haveMin ? o.vmin : s->vmin;
     p.vmax = o.haveMax ? o.vmax : s->vmax;
     if (!o.cmap.empty() && findColormap(o.cmap) >= 0) p.cmap = findColormap(o.cmap);
+    const std::string& out = o.dump;
+    if (out.size() > 4 && out.compare(out.size() - 4, 4, ".png") == 0) {
+        const DimInfo& dy = ds.dims()[ds.vars()[v].dims[k.yd]];
+        p.flipY = !(dy.coord.size() > 1 && dy.coord.back() < dy.coord.front());   // as the GUI does
+        ExportSpec e = makeExportSpec(ds, k, *s, p);
+        if (o.coasts) e.overlay = Overlay::Coast;
+        std::string err;
+        if (!exportPNG(out, e, err)) { std::fprintf(stderr, "ncview++: %s\n", err.c_str()); return 1; }
+        std::printf("%s: %s min=%g max=%g\n", out.c_str(), ds.vars()[v].fullName.c_str(), s->vmin, s->vmax);
+        return 0;
+    }
     std::vector<uint32_t> px;
     int w, h;
     renderSlice(*s, p, px, w, h);
@@ -217,7 +229,9 @@ int main(int argc, char** argv) {
     style.FontScaleDpi = scale;
     ImFontConfig fc;
     fc.FontDataOwnedByAtlas = false;
-    io.Fonts->AddFontFromMemoryTTF((void*)roboto_medium_ttf, (int)roboto_medium_ttf_len, 15.0f, &fc);
+    int fontLen = 0;
+    const unsigned char* fontData = uiFontTTF(&fontLen);
+    io.Fonts->AddFontFromMemoryTTF((void*)fontData, fontLen, 15.0f, &fc);
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer3_Init(ren);
 

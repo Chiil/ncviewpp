@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "render.h"   // niceTicks
 
 namespace ncvpp {
 
@@ -24,8 +25,5 @@ struct PlotOptions {
 // Draws the plot filling `size`. Returns true when clicked; *clickedX is the x value.
 bool drawPlot(const char* id, ImVec2 size, const std::vector<PlotSeries>& series,
               const PlotOptions& opt, double* clickedX);
-
-// "Nice" tick positions covering [lo, hi].
-std::vector<double> niceTicks(double lo, double hi, int target);
 
 } // namespace ncvpp

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 
+#include "export.h"
 #include "imgui.h"
 
 namespace ncvpp {
@@ -220,9 +221,9 @@ void App::reload() {
 
     std::string err;
     if (!ds_.reload(err)) {
-        reloadMsg_ = "reload failed: " + err;
-        reloadMsgT_ = nowSec();
-        SDL_Log("ncview++: %s", reloadMsg_.c_str());
+        statusMsg_ = "reload failed: " + err;
+        statusMsgT_ = nowSec();
+        SDL_Log("ncview++: %s", statusMsg_.c_str());
         return;
     }
     for (const auto& n : ds_.notes()) SDL_Log("ncview++: %s", n.c_str());
@@ -230,7 +231,7 @@ void App::reload() {
     ovKey_.clear();
     renderDirty_ = true;
     version_++;
-    reloadMsgT_ = nowSec();
+    statusMsgT_ = nowSec();
 
     int v = varName.empty() ? -1 : ds_.findVar(varName);
     std::vector<std::string> newNames;
@@ -241,7 +242,7 @@ void App::reload() {
         var_ = -1;
         shown_.reset();
         selectVar(v >= 0 ? v : 0);
-        reloadMsg_ = v < 0 ? "reloaded; '" + varName + "' no longer exists" : "reloaded";
+        statusMsg_ = v < 0 ? "reloaded; '" + varName + "' no longer exists" : "reloaded";
         return;
     }
 
@@ -258,10 +259,10 @@ void App::reload() {
     if (animd_ >= 0) {
         const size_t len = shape[animd_];
         const std::string& n = ds_.dims()[ds_.vars()[v].dims[animd_]].name;
-        reloadMsg_ = len == oldLen ? "reloaded, no new " + n + " steps"
+        statusMsg_ = len == oldLen ? "reloaded, no new " + n + " steps"
                                    : "reloaded, " + n + ": " + std::to_string(oldLen) + " -> " + std::to_string(len);
     } else {
-        reloadMsg_ = "reloaded";
+        statusMsg_ = "reloaded";
     }
 
     {
@@ -434,6 +435,27 @@ void App::updateTexture() {
     version_++;
 }
 
+void App::exportImage() {
+    statusMsgT_ = nowSec();
+    if (!isImageVar() || !shown_ || shown_->data.size() != shown_->nx * shown_->ny) {
+        statusMsg_ = "export: nothing to export";
+        return;
+    }
+    RenderParams rp = rp_;
+    rp.vmin = vmin_;
+    rp.vmax = vmax_;
+    ExportSpec e = makeExportSpec(ds_, shownKey_, *shown_, rp);
+    e.overlay = overlay_;
+    {
+        std::lock_guard<std::mutex> lk(plotMutex_);
+        for (size_t i = 0; i < lines_.size(); ++i)   // IM_COL32 packs R in the low byte, like packRGBA
+            e.markers.push_back({lines_[i]->ix, lines_[i]->iy, (uint32_t)kLineColors[i % 6]});
+    }
+    std::string path = exportFileName(ds_, shownKey_, animd_), err;
+    statusMsg_ = exportPNG(path, e, err) ? "saved " + path : "export failed: " + err;
+    SDL_Log("ncview++: %s", statusMsg_.c_str());
+}
+
 // ------------------------------------------------------------------ plots
 
 void App::addPlotLine(size_t ix, size_t iy, bool append) {
@@ -517,6 +539,7 @@ void App::handleKeys() {
     else if (pressed(ImGuiKey_R) && shown_ && shown_->anyValid) {
         vmin_ = shown_->vmin; vmax_ = shown_->vmax; rangeUser_ = true; renderDirty_ = true;
     }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) exportImage();
     if (pressed(ImGuiKey_A)) { rangeUser_ = false; startScan(false); }
     if (pressed(ImGuiKey_F)) fit_ = true;
     if (pressed(ImGuiKey_O)) { overlay_ = overlay_ == Overlay::None ? Overlay::Coast : Overlay::None; renderDirty_ = true; }
@@ -816,12 +839,18 @@ void App::drawToolbar() {
     ImGui::SameLine();
     if (ImGui::Button("reload")) reload();
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reopen the files to pick up new data (F5, ctrl-r)");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!isImageVar() || !shown_);
+    if (ImGui::Button("export")) exportImage();
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Save the current frame as a PNG figure with axes in the working directory (ctrl-s)");
     if (loading_ || loader_.busy()) {
         ImGui::SameLine();
         ImGui::TextDisabled(loading_ ? "loading..." : "reading...");
-    } else if (!reloadMsg_.empty() && nowSec() - reloadMsgT_ < 5) {
+    } else if (!statusMsg_.empty() && nowSec() - statusMsgT_ < 5) {
         ImGui::SameLine();
-        ImGui::TextDisabled("%s", reloadMsg_.c_str());
+        ImGui::TextDisabled("%s", statusMsg_.c_str());
     }
 
     if (!isImageVar()) return;

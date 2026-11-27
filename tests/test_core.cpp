@@ -5,12 +5,14 @@
 #include <thread>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include <netcdf.h>
 
 #include "cftime.h"
 #include "dataset.h"
+#include "export.h"
 #include "loader.h"
 #include "overlay.h"
 #include "render.h"
@@ -291,6 +293,37 @@ static void testReload(const std::string& dir) {
     }
 }
 
+static void testExport(const std::string& dir) {
+    Dataset ds;
+    std::string err;
+    EXPECT(ds.open({dir + "/tas_all.nc"}, err));
+    int v = ds.findVar("tas");
+    if (v < 0) { EXPECT(false); return; }
+    SliceKey k = key(ds, v, {2, 0, 0});
+    SliceP s = readSlice(ds, k);
+    RenderParams rp;
+    rp.vmin = s->vmin;
+    rp.vmax = s->vmax;
+    ExportSpec e = makeExportSpec(ds, k, *s, rp);
+    EXPECT(e.title == "near-surface air temperature");
+    EXPECT(e.cbarLabel == "K");
+    EXPECT(e.subtitle.rfind("time = ", 0) == 0);
+    EXPECT(exportFileName(ds, k, 0) == "tas_0002.png");
+    std::string path = dir + "/export_test.png";
+    EXPECT(exportPNG(path, e, err));
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { EXPECT(false); return; }
+    unsigned char b[64] = {};
+    size_t n = std::fread(b, 1, sizeof b, f);
+    std::fclose(f);
+    auto be32 = [&](int o) { return (uint32_t(b[o]) << 24) | (uint32_t(b[o + 1]) << 16) | (uint32_t(b[o + 2]) << 8) | b[o + 3]; };
+    EXPECT(n == sizeof b && std::memcmp(b, "\x89PNG", 4) == 0);
+    EXPECT(be32(16) > s->nx && be32(20) > s->ny);                     // image plus margins
+    EXPECT(std::max(be32(16), be32(20)) >= 1800);                     // upscaled to the minimum size
+    EXPECT(std::memcmp(b + 37, "pHYs", 4) == 0 && be32(41) == 11811);  // 300 dpi in px/m
+    EXPECT(!exportPNG(dir + "/no/such/dir/x.png", e, err) && !err.empty());
+}
+
 static void bench(const std::string& path) {
     Dataset ds;
     std::string err;
@@ -323,6 +356,7 @@ int main(int argc, char** argv) {
     testGroups(dir);
     testMerge(dir);
     testReload(dir);
+    testExport(dir);
     bench(dir + "/big.nc");
     std::printf(fails ? "%d FAILURES\n" : "all tests passed\n", fails);
     return fails ? 1 : 0;
