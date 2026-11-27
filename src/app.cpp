@@ -446,7 +446,7 @@ void App::exportImage() {
     rp.vmax = vmax_;
     ExportSpec e = makeExportSpec(ds_, shownKey_, *shown_, rp);
     e.overlay = overlay_;
-    {
+    if (showPlot_) {
         std::lock_guard<std::mutex> lk(plotMutex_);
         for (size_t i = 0; i < lines_.size(); ++i)   // IM_COL32 packs R in the low byte, like packRGBA
             e.markers.push_back({lines_[i]->ix, lines_[i]->iy, (uint32_t)kLineColors[i % 6]});
@@ -1057,8 +1057,8 @@ void App::drawCanvas(ImVec2 size) {
     if (hov && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !dragged_ && hoverValid_)
         addPlotLine(hx_, hy_, io.KeyCtrl || io.KeyShift);
 
-    // Markers of plotted points.
-    {
+    // Markers of plotted points (only while the plot window is open).
+    if (showPlot_) {
         std::lock_guard<std::mutex> lk(plotMutex_);
         for (size_t i = 0; i < lines_.size(); ++i) {
             float u = lines_[i]->ix + 0.5f;
