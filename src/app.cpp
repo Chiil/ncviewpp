@@ -405,6 +405,7 @@ void App::updateTexture() {
     rp_.vmax = vmax_;
     rp_.decim = int(std::max<size_t>(1, (std::max(shown_->nx, shown_->ny) + maxTex_ - 1) / maxTex_));
     int w = 0, h = 0;
+    double t0 = nowSec();
     renderSlice(*shown_, rp_, pixels_, w, h);
 
     // Coastline overlay on lon/lat grids.
@@ -430,7 +431,10 @@ void App::updateTexture() {
         texH_ = h;
         if (!tex_) SDL_Log("ncview++: cannot create %dx%d texture: %s", w, h, SDL_GetError());
     }
+    double t1 = nowSec();
     if (tex_) SDL_UpdateTexture(tex_, nullptr, pixels_.data(), w * 4);
+    g_profRender += t1 - t0;
+    g_profUpload += nowSec() - t1;
     renderDirty_ = false;
     version_++;
 }

@@ -242,6 +242,16 @@ int main(int argc, char** argv) {
         int settle = 3;           // ImGui needs a few frames after input to reach a steady state
         int frames = 0;
         bool forcePresent = true;
+        // NCVPP_PROFILE=1: once per second print where the frame time goes (stderr).
+        const bool prof = std::getenv("NCVPP_PROFILE") != nullptr;
+        if (prof) {
+            const char* rn = SDL_GetRendererName(ren);
+            int w = 0, h = 0;
+            SDL_GetWindowSizeInPixels(win, &w, &h);
+            std::fprintf(stderr, "ncview++ profile: renderer=%s window=%dx%d px\n", rn ? rn : "?", w, h);
+        }
+        double profT0 = SDL_GetTicksNS() * 1e-9, profDraw = 0, profPresent = 0;
+        int profPresents = 0;
         while (!app.quit()) {
             if (!opt.screenshot.empty()) settle = 3;   // test hook: keep rendering
             SDL_Event e;
@@ -265,6 +275,22 @@ int main(int argc, char** argv) {
             if (quit) break;
             if (SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED) { SDL_Delay(20); continue; }
 
+            if (prof) {
+                double now = SDL_GetTicksNS() * 1e-9, dt = now - profT0;
+                if (dt >= 1.0) {
+                    auto ms = [&](double s, int n) { return n ? 1000.0 * s / n : 0.0; };
+                    int w = 0, h = 0;
+                    SDL_GetWindowSizeInPixels(win, &w, &h);
+                    std::fprintf(stderr, "ncview++ profile: %.1f presents/s | per present: colour %.1f ms, "
+                                 "upload %.1f ms, draw %.1f ms, present %.1f ms | window %dx%d\n",
+                                 profPresents / dt, ms(g_profRender, profPresents), ms(g_profUpload, profPresents),
+                                 ms(profDraw, profPresents), ms(profPresent, profPresents), w, h);
+                    g_profRender = g_profUpload = profDraw = profPresent = 0;
+                    profPresents = 0;
+                    profT0 = now;
+                }
+            }
+
             ImGui_ImplSDLRenderer3_NewFrame();
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
@@ -283,6 +309,7 @@ int main(int argc, char** argv) {
             lastVersion = app.version();
             forcePresent = false;
 
+            double tDraw = SDL_GetTicksNS() * 1e-9;
             SDL_SetRenderScale(ren, io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y);
             SDL_SetRenderDrawColor(ren, 30, 30, 34, 255);
             SDL_RenderClear(ren);
@@ -293,7 +320,14 @@ int main(int argc, char** argv) {
                 SDL_RenderPresent(ren);
                 break;
             }
+            double tPresent = SDL_GetTicksNS() * 1e-9;
             SDL_RenderPresent(ren);
+            if (prof) {
+                double t = SDL_GetTicksNS() * 1e-9;
+                profDraw += tPresent - tDraw;
+                profPresent += t - tPresent;
+                ++profPresents;
+            }
         }
     }
 

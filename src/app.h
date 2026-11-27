@@ -16,6 +16,9 @@
 
 namespace ncvpp {
 
+// Accumulated seconds spent in updateTexture stages (read by the NCVPP_PROFILE report in main).
+inline double g_profRender = 0, g_profUpload = 0;
+
 struct Options {
     std::vector<std::string> files;
     std::string var, cmap;
