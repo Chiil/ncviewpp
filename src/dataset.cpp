@@ -1,4 +1,5 @@
 #include "dataset.h"
+#include "prefetch.h"
 
 #include <netcdf.h>
 
@@ -144,6 +145,7 @@ bool Dataset::open(const std::vector<std::string>& paths, std::string& err, Mult
     nc_set_chunk_cache(256u << 20, 4133, 0.75f);
     paths_ = paths;
     mode_ = mode;
+    prefetchCoords(paths);
     for (const auto& p : paths) {
         File f; f.path = p;
         int st = nc_open(p.c_str(), NC_NOWRITE, &f.ncid);
